@@ -19,7 +19,8 @@ scalacOptions ++= Seq(
   "-Ywarn-dead-code",
   "-Ywarn-numeric-widen",
   "-Ywarn-value-discard",
-  "-Xfuture"
+  "-Xfuture",
+  "-Ywarn-unused-import"
 )
 
 libraryDependencies ++= {
@@ -28,6 +29,8 @@ libraryDependencies ++= {
   Seq(
     akkaGroupId              %% "akka-stream"                           % akkaV,
     akkaGroupId              %% "akka-http-core"                        % akkaV,
-    akkaGroupId              %% "akka-http-experimental"                % akkaV
+    akkaGroupId              %% "akka-http-experimental"                % akkaV,
+    akkaGroupId              %% "akka-slf4j"                            % akkaV,
+    "ch.qos.logback"         %  "logback-classic"                       % "1.1.7"
   )
 }

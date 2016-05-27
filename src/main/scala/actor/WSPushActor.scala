@@ -1,63 +1,157 @@
 package actor
 
-import akka.actor.{Actor, ActorRef, Props}
+import akka.actor.{FSM, Props}
 import akka.http.scaladsl.Http
-import akka.http.scaladsl.model.ws.{Message, WebSocketRequest}
+import akka.http.scaladsl.model.ws.{Message, WebSocketRequest, WebSocketUpgradeResponse}
 import akka.stream.ActorMaterializer
 import akka.stream.actor.ActorPublisher
 import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
+import util.PushDestination
 
-import scala.concurrent.Promise
+import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.{ExecutionContextExecutor, Future, Promise}
 
 /**
   * Created by victor on 26/05/16.
   */
-class WSPushActor extends Actor {
+
+class WSPushActor(
+  maxBufferSize: Int,
+  pushDestination: PushDestination,
+  defaultTickDuration: FiniteDuration,
+  fastTickDuration: FiniteDuration
+  )(implicit ec: ExecutionContextExecutor) extends FSM[State, Data] {
+
   private implicit val materializer = ActorMaterializer()
-  private implicit val ec = context.dispatcher
+  private val (wTimerName, cTimerName, dTimerName) = ("waiting", "connected", "disconnected")
+  private def tickTimerFor(name: String, duration: FiniteDuration = defaultTickDuration) = setTimer(name, Tick, duration, repeat = true)
 
-  private var publisher: ActorRef = context.actorOf(Publisher.props())
-  private val MaxBufferSize = 1000
-  private var buffer = Vector.empty[Message]
-
-  private var publisherState: Option[Vector[Message]] = None
-
-  override def preStart(): Unit = {
-    context.become(unconnected)
+  private def getPusher = {
+    val actor = context.actorOf(Publisher.props(maxBufferSize))
+    val sink = Sink.ignore
+    val source = Source.fromPublisher(ActorPublisher[Message](actor)).concatMat(Source.maybe[Message])(Keep.right)
+    val flow: Flow[Message, Message, Promise[Option[Message]]] = Flow.fromSinkAndSourceMat(sink, source)(Keep.right)
+    val (upgradeResponse, canceled) = Http()(context.system).singleWebSocketRequest(WebSocketRequest(pushDestination.toWSTargetUri), flow)
+    actor ! CancelPromise(canceled)
+    val connected = upgradeResponse.flatMap{
+      case resp: WebSocketUpgradeResponse if resp.response.status.isSuccess => Future.successful(())
+      case _ => Future.failed[Unit](new Exception)
+    }
+    (actor, connected, canceled)
   }
 
-  def connected: Receive = {
-    case st: PublisherActorState =>
-      publisherState = if (st.buffer.isEmpty) None else Some(st.buffer)
-    case m: Message =>
-      publisher ! m
+  private final implicit class RichVector[T](vec: Vector[T]){
+    def appendFixedMaxSize(v: T): Vector[T] = (if (vec.size < maxBufferSize) vec else vec.drop(1)) :+ v
+    def concatFixedMaxSize(other: Vector[T]): Vector[T] = maxBufferSize.toLong match {
+      case mbs: Long if other.size.toLong > mbs => other.takeRight(mbs.toInt)
+      case mbs: Long if vec.size.toLong + other.size.toLong > mbs => vec.takeRight((mbs - other.size.toLong).toInt) ++ other
+      case _ => vec ++ other
+    }
   }
 
-  def unconnected: Receive = {
-    case st: PublisherActorState =>
-      publisherState = if (st.buffer.isEmpty) None else Some(st.buffer)
-    case m: Message =>
-      publisher = context.actorOf(Publisher.props(publisherState))
-      val sink = Sink.ignore
-      val source = Source.fromPublisher(ActorPublisher[Message](publisher)).concatMat(Source.maybe[Message])(Keep.right)
-      val flow: Flow[Message, Message, Promise[Option[Message]]] = Flow.fromSinkAndSourceMat(sink, source)(Keep.right)
-      val (upgradeResponse, promise) = Http()(context.system).singleWebSocketRequest(WebSocketRequest("ws://0.0.0.0:2525"), flow)
-      if(buffer.size <= MaxBufferSize) buffer :+= m else buffer = buffer.drop(1) :+ m
-      upgradeResponse.onSuccess{
-        case x if x.response.status.isSuccess =>
-          context.become(connected)
-          publisherState = None
-          val buf = buffer
-          buf foreach {v =>
-            self ! v
-            buffer = buffer.drop(1)
-          }
-        case _ => ()
+  startWith(Idle, Empty)
+
+  when(Idle) {
+    case Event(Push(m), Empty) =>
+      val (actor, connected, canceled) = getPusher
+      goto(WFC) using PossibleConnection(Vector(m), actor, connected, canceled)
+    case Event(CancelWithRecoveredState(b), Empty) =>
+      goto(Disconnected) using Buffer(b)
+  }
+
+  when(WFC) {
+    case Event(Push(m), PossibleConnection(buf, pusher, connected, canceled)) if canceled.isCompleted =>
+      goto(Disconnected) using Buffer(buf appendFixedMaxSize m)
+    case Event(Push(m), PossibleConnection(buf, pusher, connected, canceled)) if connected.isCompleted =>
+      goto(Connected) using Connection(buf appendFixedMaxSize m, pusher, canceled)
+    case Event(Push(m), PossibleConnection(buf, pusher, connected, canceled)) =>
+      stay using PossibleConnection(buf appendFixedMaxSize m, pusher, connected, canceled)
+    case Event(Tick, _) =>
+      stateData match {
+        case PossibleConnection(buf, pusher, connected, canceled) if canceled.isCompleted =>
+          goto(Disconnected) using Buffer(buf)
+        case PossibleConnection(buf, pusher, connected, canceled) if connected.isCompleted =>
+          goto(Connected) using Connection(buf, pusher, canceled)
+        case _ =>
+          stay
       }
-      promise.future.onComplete(_ => context.become(unconnected))
-    case _ => ()
+    case Event(CancelWithRecoveredState(b), PossibleConnection(buf, pusher, connected, canceled)) =>
+      stay using PossibleConnection(b concatFixedMaxSize buf, pusher, connected, canceled)
   }
 
-  def receive = Actor.emptyBehavior
+  when(Connected) {
+    case Event(Push(m), Connection(buf, pusher, canceled)) if canceled.isCompleted =>
+      goto(Disconnected) using Buffer(buf appendFixedMaxSize m)
+    case Event(Push(m), Connection(buf, pusher, canceled)) if buf.isEmpty =>
+      pusher ! m
+      stay
+    case Event(Push(m), Connection(buf, pusher, canceled)) =>
+      stay using Connection(buf appendFixedMaxSize m, pusher, canceled)
+    case Event(Tick, _) =>
+      stateData match {
+        case Connection(buf, pusher, canceled) if canceled.isCompleted =>
+          goto(Disconnected) using Buffer(buf)
+        case Connection(buf, pusher, canceled) if buf.isEmpty =>
+          cancelTimer(cTimerName)
+          stay
+        case Connection(buf, pusher, canceled) =>
+          buf.foreach(pusher ! _)
+          stay using Connection(Vector.empty, pusher, canceled)
+      }
+    case Event(CancelWithRecoveredState(b), Connection(buf, pusher, canceled)) =>
+      goto(Disconnected) using Buffer(b concatFixedMaxSize buf)
+  }
+
+  when(Disconnected) {
+    case Event(Push(m), Buffer(buf)) =>
+      val (actor, connected, canceled) = getPusher
+      goto(WFC) using PossibleConnection(buf appendFixedMaxSize m, actor, connected, canceled)
+    case Event(Tick, _) =>
+      stateData match {
+        case Buffer(buf) if buf.isEmpty =>
+          goto(Idle) using Empty
+        case Buffer(buf) =>
+          val (actor, connected, canceled) = getPusher
+          goto(WFC) using PossibleConnection(buf, actor, connected, canceled)
+      }
+    case Event(CancelWithRecoveredState(b), Buffer(buf)) =>
+      stay using Buffer(b concatFixedMaxSize buf)
+  }
+
+  onTransition{
+    case Idle -> WFC =>
+      tickTimerFor(wTimerName, fastTickDuration)
+    case WFC -> Connected =>
+      cancelTimer(wTimerName)
+      tickTimerFor(cTimerName, fastTickDuration)
+      log.info("New WebSocket connection established.")
+    case WFC -> Disconnected =>
+      cancelTimer(wTimerName)
+      tickTimerFor(dTimerName)
+      log.info("Wasn't able to establish WebSocket connection.")
+    case Connected -> Disconnected =>
+      cancelTimer(cTimerName)
+      tickTimerFor(dTimerName)
+      log.info("WebSocket connection has been closed.")
+    case Disconnected -> Idle =>
+      cancelTimer(dTimerName)
+      log.info("All messages have been processed. Idling.")
+    case Disconnected -> WFC =>
+      cancelTimer(dTimerName)
+      tickTimerFor(wTimerName, fastTickDuration)
+  }
+
+  whenUnhandled {
+    case Event(e, s) =>
+      log.warning("received unhandled request {} in state {}/{}", e, stateName, s)
+      stay
+  }
+
+  initialize()
+
 }
 
+object WSPushActor{
+  def props(mbs: Int, pd: PushDestination, dtd: FiniteDuration, ftd: FiniteDuration)(implicit ctx: ExecutionContextExecutor): Props =
+    Props(new WSPushActor(mbs, pd, dtd, ftd)(ctx))
+}
