@@ -42,13 +42,15 @@ trait Config {
     pp <- Try(c.getString("path"))
   } yield PushDestination(interface = i, port = p, path = pp)).getOrElse(throw new Exception("Wasn't able to parse Push Destination"))
   val length = config.getInt("length")
-  val randomDds = Vector.fill(length)(0).foldLeft(Set.empty[String]){ case (s, _) =>
-    def f: Set[String] = {
-      val n = Math.abs(Random.nextLong).toString
-      if (s.contains(n)) f else s + n
-    }
-    f
-  }.toVector
+  val randomDds = if (realData) {
+    Vector.fill(length)(0).foldLeft(Set.empty[String]){ case (s, _) =>
+      def f: Set[String] = {
+        val n = Math.abs(Random.nextLong).toString
+        if (s.contains(n)) f else s + n
+      }
+      f
+    }.toVector
+  } else {Vector.empty}
   val defaultDuration = finiteDuration("defaultDuration")
-  val fastDuration = finiteDuration("fastDuration")
+
 }
