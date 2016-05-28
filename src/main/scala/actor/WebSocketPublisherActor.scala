@@ -12,7 +12,7 @@ import scala.concurrent.Promise
   * Created by victor on 26/05/16.
   */
 
-class Publisher(mbs: Int) extends ActorPublisher[Message] with ActorLogging {
+class WebSocketPublisherActor(mbs: Int) extends ActorPublisher[Message] with ActorLogging {
   val maxBufferSize = mbs
   var buffer = Vector.empty[Message]
   var sendWhileInDemand = Vector.empty[Message]
@@ -44,7 +44,7 @@ class Publisher(mbs: Int) extends ActorPublisher[Message] with ActorLogging {
       }
     case Request(_) => pushBuffer()
     case Cancel =>
-      log.info("Shutting down Publisher with buffer size {}", buffer.size)
+      if (buffer nonEmpty) log.debug("Shutting down Publisher with buffer size {}", buffer.size)
       context.parent ! CancelWithRecoveredState(sendWhileInDemand ++ buffer)
       if (!p.isCompleted) p.failure(new Exception)
       context.stop(self)
@@ -55,6 +55,6 @@ class Publisher(mbs: Int) extends ActorPublisher[Message] with ActorLogging {
   }
 }
 
-object Publisher{
-  def props(mbs: Int): Props = Props(new Publisher(mbs))
+object WebSocketPublisherActor{
+  def props(mbs: Int): Props = Props(new WebSocketPublisherActor(mbs))
 }

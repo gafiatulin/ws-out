@@ -15,16 +15,15 @@ import scala.concurrent.{ExecutionContextExecutor, Future, Promise}
   * Created by victor on 26/05/16.
   */
 
-class WSPushActor(
+class WebSocketConnectionActor(
   maxBufferSize: Int,
   pushDestination: PushDestination,
-  defaultTickDuration: FiniteDuration,
-  fastTickDuration: FiniteDuration
+  tickDuration: FiniteDuration
   )(implicit ec: ExecutionContextExecutor) extends FSM[State, Data] {
 
   private implicit val materializer = ActorMaterializer()
   private val (wTimerName, cTimerName, dTimerName) = ("waiting", "connected", "disconnected")
-  private def tickTimerFor(name: String, duration: FiniteDuration = defaultTickDuration) = setTimer(name, Tick, duration, repeat = true)
+  private def tickTimerFor(name: String, duration: FiniteDuration = tickDuration) = setTimer(name, Tick, duration, repeat = true)
 
   private def getPusher = {
     val actor = context.actorOf(Publisher.props(maxBufferSize))
@@ -120,25 +119,25 @@ class WSPushActor(
 
   onTransition{
     case Idle -> WFC =>
-      tickTimerFor(wTimerName, fastTickDuration)
+      tickTimerFor(wTimerName)
     case WFC -> Connected =>
       cancelTimer(wTimerName)
-      tickTimerFor(cTimerName, fastTickDuration)
-      log.info("New WebSocket connection established.")
+      tickTimerFor(cTimerName)
+      log.debug("New WebSocket connection established.")
     case WFC -> Disconnected =>
       cancelTimer(wTimerName)
       tickTimerFor(dTimerName)
-      log.info("Wasn't able to establish WebSocket connection.")
+      log.debug("Wasn't able to establish WebSocket connection.")
     case Connected -> Disconnected =>
       cancelTimer(cTimerName)
       tickTimerFor(dTimerName)
-      log.info("WebSocket connection has been closed.")
+      log.debug("WebSocket connection has been closed.")
     case Disconnected -> Idle =>
       cancelTimer(dTimerName)
-      log.info("All messages have been processed. Idling.")
+      log.debug("All messages have been processed. Idling.")
     case Disconnected -> WFC =>
       cancelTimer(dTimerName)
-      tickTimerFor(wTimerName, fastTickDuration)
+      tickTimerFor(wTimerName)
   }
 
   whenUnhandled {
@@ -151,7 +150,7 @@ class WSPushActor(
 
 }
 
-object WSPushActor{
-  def props(mbs: Int, pd: PushDestination, dtd: FiniteDuration, ftd: FiniteDuration)(implicit ctx: ExecutionContextExecutor): Props =
-    Props(new WSPushActor(mbs, pd, dtd, ftd)(ctx))
+object WebSocketConnectionActor{
+  def props(mbs: Int, pd: PushDestination, dtd: FiniteDuration)(implicit ctx: ExecutionContextExecutor): Props =
+    Props(new WebSocketConnectionActor(mbs, pd, dtd)(ctx))
 }
