@@ -25,8 +25,8 @@ class WebSocketConnectionActor(
   private val (wTimerName, cTimerName, dTimerName) = ("waiting", "connected", "disconnected")
   private def tickTimerFor(name: String, duration: FiniteDuration = tickDuration) = setTimer(name, Tick, duration, repeat = true)
 
-  private def getPusher = {
-    val actor = context.actorOf(Publisher.props(maxBufferSize))
+  private def getWebSocketPublisher = {
+    val actor = context.actorOf(WebSocketPublisherActor.props(maxBufferSize))
     val sink = Sink.ignore
     val source = Source.fromPublisher(ActorPublisher[Message](actor)).concatMat(Source.maybe[Message])(Keep.right)
     val flow: Flow[Message, Message, Promise[Option[Message]]] = Flow.fromSinkAndSourceMat(sink, source)(Keep.right)
@@ -51,80 +51,80 @@ class WebSocketConnectionActor(
   startWith(Idle, Empty)
 
   when(Idle) {
-    case Event(Push(m), Empty) =>
-      val (actor, connected, canceled) = getPusher
-      goto(WFC) using PossibleConnection(Vector(m), actor, connected, canceled)
+    case Event(WebSocketPush(m), Empty) =>
+      val (actor, connected, canceled) = getWebSocketPublisher
+      goto(WaitingForConnection) using ConnectionAttempt(Vector(m), actor, connected, canceled)
     case Event(CancelWithRecoveredState(b), Empty) =>
       goto(Disconnected) using Buffer(b)
   }
 
-  when(WFC) {
-    case Event(Push(m), PossibleConnection(buf, pusher, connected, canceled)) if canceled.isCompleted =>
+  when(WaitingForConnection) {
+    case Event(WebSocketPush(m), ConnectionAttempt(buf, publisher, connected, canceled)) if canceled.isCompleted =>
       goto(Disconnected) using Buffer(buf appendFixedMaxSize m)
-    case Event(Push(m), PossibleConnection(buf, pusher, connected, canceled)) if connected.isCompleted =>
-      goto(Connected) using Connection(buf appendFixedMaxSize m, pusher, canceled)
-    case Event(Push(m), PossibleConnection(buf, pusher, connected, canceled)) =>
-      stay using PossibleConnection(buf appendFixedMaxSize m, pusher, connected, canceled)
+    case Event(WebSocketPush(m), ConnectionAttempt(buf, publisher, connected, canceled)) if connected.isCompleted =>
+      goto(Connected) using Connection(buf appendFixedMaxSize m, publisher, canceled)
+    case Event(WebSocketPush(m), ConnectionAttempt(buf, publisher, connected, canceled)) =>
+      stay using ConnectionAttempt(buf appendFixedMaxSize m, publisher, connected, canceled)
     case Event(Tick, _) =>
       stateData match {
-        case PossibleConnection(buf, pusher, connected, canceled) if canceled.isCompleted =>
+        case ConnectionAttempt(buf, publisher, connected, canceled) if canceled.isCompleted =>
           goto(Disconnected) using Buffer(buf)
-        case PossibleConnection(buf, pusher, connected, canceled) if connected.isCompleted =>
-          goto(Connected) using Connection(buf, pusher, canceled)
+        case ConnectionAttempt(buf, publisher, connected, canceled) if connected.isCompleted =>
+          goto(Connected) using Connection(buf, publisher, canceled)
         case _ =>
           stay
       }
-    case Event(CancelWithRecoveredState(b), PossibleConnection(buf, pusher, connected, canceled)) =>
-      stay using PossibleConnection(b concatFixedMaxSize buf, pusher, connected, canceled)
+    case Event(CancelWithRecoveredState(b), ConnectionAttempt(buf, publisher, connected, canceled)) =>
+      stay using ConnectionAttempt(b concatFixedMaxSize buf, publisher, connected, canceled)
   }
 
   when(Connected) {
-    case Event(Push(m), Connection(buf, pusher, canceled)) if canceled.isCompleted =>
+    case Event(WebSocketPush(m), Connection(buf, publisher, canceled)) if canceled.isCompleted =>
       goto(Disconnected) using Buffer(buf appendFixedMaxSize m)
-    case Event(Push(m), Connection(buf, pusher, canceled)) if buf.isEmpty =>
-      pusher ! m
+    case Event(WebSocketPush(m), Connection(buf, publisher, canceled)) if buf.isEmpty =>
+      publisher ! m
       stay
-    case Event(Push(m), Connection(buf, pusher, canceled)) =>
-      stay using Connection(buf appendFixedMaxSize m, pusher, canceled)
+    case Event(WebSocketPush(m), Connection(buf, publisher, canceled)) =>
+      stay using Connection(buf appendFixedMaxSize m, publisher, canceled)
     case Event(Tick, _) =>
       stateData match {
-        case Connection(buf, pusher, canceled) if canceled.isCompleted =>
+        case Connection(buf, publisher, canceled) if canceled.isCompleted =>
           goto(Disconnected) using Buffer(buf)
-        case Connection(buf, pusher, canceled) if buf.isEmpty =>
+        case Connection(buf, publisher, canceled) if buf.isEmpty =>
           cancelTimer(cTimerName)
           stay
-        case Connection(buf, pusher, canceled) =>
-          buf.foreach(pusher ! _)
-          stay using Connection(Vector.empty, pusher, canceled)
+        case Connection(buf, publisher, canceled) =>
+          buf.foreach(publisher ! _)
+          stay using Connection(Vector.empty, publisher, canceled)
       }
-    case Event(CancelWithRecoveredState(b), Connection(buf, pusher, canceled)) =>
+    case Event(CancelWithRecoveredState(b), Connection(buf, publisher, canceled)) =>
       goto(Disconnected) using Buffer(b concatFixedMaxSize buf)
   }
 
   when(Disconnected) {
-    case Event(Push(m), Buffer(buf)) =>
-      val (actor, connected, canceled) = getPusher
-      goto(WFC) using PossibleConnection(buf appendFixedMaxSize m, actor, connected, canceled)
+    case Event(WebSocketPush(m), Buffer(buf)) =>
+      val (actor, connected, canceled) = getWebSocketPublisher
+      goto(WaitingForConnection) using ConnectionAttempt(buf appendFixedMaxSize m, actor, connected, canceled)
     case Event(Tick, _) =>
       stateData match {
         case Buffer(buf) if buf.isEmpty =>
           goto(Idle) using Empty
         case Buffer(buf) =>
-          val (actor, connected, canceled) = getPusher
-          goto(WFC) using PossibleConnection(buf, actor, connected, canceled)
+          val (actor, connected, canceled) = getWebSocketPublisher
+          goto(WaitingForConnection) using ConnectionAttempt(buf, actor, connected, canceled)
       }
     case Event(CancelWithRecoveredState(b), Buffer(buf)) =>
       stay using Buffer(b concatFixedMaxSize buf)
   }
 
   onTransition{
-    case Idle -> WFC =>
+    case Idle -> WaitingForConnection =>
       tickTimerFor(wTimerName)
-    case WFC -> Connected =>
+    case WaitingForConnection -> Connected =>
       cancelTimer(wTimerName)
       tickTimerFor(cTimerName)
       log.debug("New WebSocket connection established.")
-    case WFC -> Disconnected =>
+    case WaitingForConnection -> Disconnected =>
       cancelTimer(wTimerName)
       tickTimerFor(dTimerName)
       log.debug("Wasn't able to establish WebSocket connection.")
@@ -135,7 +135,7 @@ class WebSocketConnectionActor(
     case Disconnected -> Idle =>
       cancelTimer(dTimerName)
       log.debug("All messages have been processed. Idling.")
-    case Disconnected -> WFC =>
+    case Disconnected -> WaitingForConnection =>
       cancelTimer(dTimerName)
       tickTimerFor(wTimerName)
   }

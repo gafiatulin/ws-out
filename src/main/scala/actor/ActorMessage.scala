@@ -9,7 +9,7 @@ import scala.concurrent.Promise
   */
 
 sealed trait ActorMessage
-final case class Push(m: Message) extends ActorMessage
 case object Tick extends ActorMessage
+final case class WebSocketPush(m: Message) extends ActorMessage
 final case class CancelWithRecoveredState(buf: Vector[Message]) extends ActorMessage
 final case class CancelPromise(p: Promise[Option[Message]]) extends ActorMessage

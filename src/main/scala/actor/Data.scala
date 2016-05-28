@@ -11,6 +11,6 @@ import scala.concurrent.{Future, Promise}
 
 sealed trait Data
 case object Empty extends Data
-final case class PossibleConnection(buf: Vector[Message], pusher: ActorRef, connected: Future[_], canceled: Promise[_]) extends Data
+final case class ConnectionAttempt(buf: Vector[Message], pusher: ActorRef, connected: Future[_], canceled: Promise[_]) extends Data
 final case class Connection(buf: Vector[Message], pusher: ActorRef , canceled: Promise[_]) extends Data
 final case class Buffer(buf: Vector[Message]) extends Data
