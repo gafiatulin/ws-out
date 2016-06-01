@@ -5,6 +5,7 @@ import java.util.concurrent.Executors
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model.ws.TextMessage
 import akka.stream.ActorMaterializer
+import akka.stream.scaladsl.Sink
 import com.github.gafiatulin.actor.{WebSocketConnectionActor, WebSocketPush}
 import com.github.gafiatulin.util.Config
 
@@ -21,11 +22,13 @@ object Main extends App with Config {
   private implicit val ctx = ExecutionContext.fromExecutor(Executors.newCachedThreadPool)
 
   private def runWith(f: String => Unit): Unit = {
-    scala.io.StdIn.readLong
-    runWith(f)
+    val num = scala.io.StdIn.readInt
 
+    (1 to num).foreach(i => f(i.toString))
+
+    runWith(f)
   }
-  val wsConnectionActor = system.actorOf(WebSocketConnectionActor.props(connectionQueueBufferSize, pushDestination, defaultDuration))
+  val wsConnectionActor = system.actorOf(WebSocketConnectionActor.props(connectionQueueBufferSize, pushDestination, defaultDuration, Sink.ignore))
 
   runWith(s => wsConnectionActor ! WebSocketPush(TextMessage(s)))
 
