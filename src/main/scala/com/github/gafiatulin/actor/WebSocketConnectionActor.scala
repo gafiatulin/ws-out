@@ -3,9 +3,9 @@ package com.github.gafiatulin.actor
 import akka.actor.{FSM, Props}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.ws.{Message, WebSocketRequest, WebSocketUpgradeResponse}
-import akka.stream.ActorMaterializer
 import akka.stream.actor.ActorPublisher
-import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
+import akka.stream.scaladsl.{Flow, Keep, Source}
+import akka.stream.{ActorMaterializer, Graph, SinkShape}
 import com.github.gafiatulin.util.PushDestination
 
 import scala.concurrent.duration.FiniteDuration
@@ -15,10 +15,11 @@ import scala.concurrent.{ExecutionContextExecutor, Future, Promise}
   * Created by victor on 26/05/16.
   */
 
-class WebSocketConnectionActor(
+class WebSocketConnectionActor[A](
   maxBufferSize: Int,
   pushDestination: PushDestination,
-  tickDuration: FiniteDuration
+  tickDuration: FiniteDuration,
+  sink: Graph[SinkShape[Message], A]
   )(implicit ec: ExecutionContextExecutor) extends FSM[State, Data] {
 
   private implicit val materializer = ActorMaterializer()
@@ -27,7 +28,6 @@ class WebSocketConnectionActor(
 
   private def getWebSocketPublisher = {
     val actor = context.actorOf(WebSocketPublisherActor.props(maxBufferSize))
-    val sink = Sink.ignore
     val source = Source.fromPublisher(ActorPublisher[Message](actor)).concatMat(Source.maybe[Message])(Keep.right)
     val flow: Flow[Message, Message, Promise[Option[Message]]] = Flow.fromSinkAndSourceMat(sink, source)(Keep.right)
     val (upgradeResponse, canceled) = Http()(context.system).singleWebSocketRequest(WebSocketRequest(pushDestination.toWSTargetUri), flow)
@@ -151,6 +151,6 @@ class WebSocketConnectionActor(
 }
 
 object WebSocketConnectionActor{
-  def props(mbs: Int, pd: PushDestination, dtd: FiniteDuration)(implicit ctx: ExecutionContextExecutor): Props =
-    Props(new WebSocketConnectionActor(mbs, pd, dtd)(ctx))
+  def props[T](mbs: Int, pd: PushDestination, dtd: FiniteDuration, sink: Graph[SinkShape[Message], T])(implicit ctx: ExecutionContextExecutor): Props =
+    Props(new WebSocketConnectionActor[T](mbs, pd, dtd, sink)(ctx))
 }
