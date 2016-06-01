@@ -1,4 +1,4 @@
-package util
+package com.github.gafiatulin.util
 
 import akka.http.scaladsl.model.Uri
 

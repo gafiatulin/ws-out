@@ -1,4 +1,4 @@
-package actor
+package com.github.gafiatulin.actor
 
 /**
   * Created by victor on 27/05/16.

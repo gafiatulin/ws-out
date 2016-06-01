@@ -1,4 +1,4 @@
-package actor
+package com.github.gafiatulin.actor
 
 import akka.actor.{ActorLogging, Props}
 import akka.http.scaladsl.model.ws.Message
@@ -7,6 +7,7 @@ import akka.stream.actor.ActorPublisherMessage.{Cancel, Request}
 
 import scala.annotation.tailrec
 import scala.concurrent.Promise
+import scala.util.Try
 
 /**
   * Created by victor on 26/05/16.
@@ -44,9 +45,9 @@ class WebSocketPublisherActor(mbs: Int) extends ActorPublisher[Message] with Act
       }
     case Request(_) => pushBuffer()
     case Cancel =>
-      if (buffer nonEmpty) log.debug("Shutting down Publisher with buffer size {}", buffer.size)
+      if (buffer nonEmpty) log.debug("Shutting down Publisher with buffer size {}", sendWhileInDemand.size + buffer.size)
       context.parent ! CancelWithRecoveredState(sendWhileInDemand ++ buffer)
-      if (!p.isCompleted) p.failure(new Exception)
+      if (!p.isCompleted) Try(p.failure(new Exception))
       context.stop(self)
   }
 

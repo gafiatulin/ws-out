@@ -1,4 +1,4 @@
-package actor
+package com.github.gafiatulin.actor
 
 import akka.actor.{FSM, Props}
 import akka.http.scaladsl.Http
@@ -6,7 +6,7 @@ import akka.http.scaladsl.model.ws.{Message, WebSocketRequest, WebSocketUpgradeR
 import akka.stream.ActorMaterializer
 import akka.stream.actor.ActorPublisher
 import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
-import util.PushDestination
+import com.github.gafiatulin.util.PushDestination
 
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.{ExecutionContextExecutor, Future, Promise}

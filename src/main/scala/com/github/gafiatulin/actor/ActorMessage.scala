@@ -1,4 +1,4 @@
-package actor
+package com.github.gafiatulin.actor
 
 import akka.http.scaladsl.model.ws.Message
 
